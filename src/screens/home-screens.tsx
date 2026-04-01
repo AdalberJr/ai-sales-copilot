@@ -18,12 +18,14 @@ import { LeadForm, LeadFormValues } from '../components/lead-form';
 import { Database } from '../types/supabase';
 import { formatLeadStatus } from '../types/leads';
 import { AiActionType } from '../types/ai';
+import { formatFollowUpDate, getDatePlusDays, getTomorrowDate, toIsoAtDefaultTime } from '../utils/follow-up';
 
 type LeadRow = Database['public']['Tables']['leads']['Row'];
 
 export function TodayScreen() {
   const { session } = useAuth();
-  const { leads, loading, reload } = useLeads(session?.user.id);
+  const { leads, loading, reload, updateLead } = useLeads(session?.user.id);
+  const [actionMessage, setActionMessage] = useState<string | null>(null);
 
   const now = new Date();
   const todayKey = now.toISOString().slice(0, 10);
@@ -31,21 +33,53 @@ export function TodayScreen() {
   const overdue = leads.filter((lead) => lead.follow_up_date && lead.follow_up_date.slice(0, 10) < todayKey);
   const dueToday = leads.filter((lead) => lead.follow_up_date && lead.follow_up_date.slice(0, 10) === todayKey);
 
+  async function markAsContacted(lead: LeadRow) {
+    const result = await updateLead(lead.id, {
+      status: 'contacted',
+      updated_at: new Date().toISOString(),
+    });
+
+    if (!result.error) {
+      setActionMessage(`${lead.name} wurde als kontaktiert markiert.`);
+    }
+  }
+
+  async function snoozeLead(lead: LeadRow, days: number) {
+    const nextDate = days === 1 ? getTomorrowDate() : getDatePlusDays(days);
+    const result = await updateLead(lead.id, {
+      follow_up_date: toIsoAtDefaultTime(nextDate),
+      updated_at: new Date().toISOString(),
+    });
+
+    if (!result.error) {
+      setActionMessage(`Follow-up für ${lead.name} auf ${nextDate} verschoben.`);
+    }
+  }
+
   return (
     <SafeAreaView style={styles.screen}>
       <Text style={styles.title}>Today</Text>
       <Text style={styles.subtitle}>Deine wichtigsten Follow-ups zuerst. Überfällige Leads müssen sofort sichtbar sein.</Text>
+      {actionMessage ? <Text style={styles.successText}>{actionMessage}</Text> : null}
 
       {loading ? <ActivityIndicator style={styles.loader} size="large" color="#0F172A" /> : null}
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Überfällig</Text>
-        {overdue.length === 0 ? <Text style={styles.emptyText}>Keine überfälligen Leads. Gut.</Text> : overdue.map(renderTodayCard)}
+        {overdue.length === 0 ? (
+          <Text style={styles.emptyText}>Keine überfälligen Leads. Gut.</Text>
+        ) : (
+          overdue.map((lead) => renderTodayCard(lead, markAsContacted, snoozeLead))
+        )}
       </View>
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Heute fällig</Text>
-        {dueToday.length === 0 ? <Text style={styles.emptyText}>Heute ist aktuell nichts fällig.</Text> : dueToday.map(renderTodayCard)}
+        {dueToday.length === 0 ? (
+          <Text style={styles.emptyText}>Heute ist aktuell nichts fällig.</Text>
+        ) : (
+          dueToday.map((lead) => renderTodayCard(lead, markAsContacted, snoozeLead))
+        )}
       </View>
 
       <Pressable onPress={reload} style={styles.inlineButton}>
@@ -66,6 +100,7 @@ export function LeadsScreen() {
   const [selectedLead, setSelectedLead] = useState<LeadRow | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
   const [aiOutput, setAiOutput] = useState<string | null>(null);
+  const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
   const filteredLeads = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -83,6 +118,7 @@ export function LeadsScreen() {
 
   async function handleSubmit(values: LeadFormValues) {
     setFormError(null);
+    setSuccessMessage(null);
 
     const payload = {
       name: values.name.trim(),
@@ -93,7 +129,7 @@ export function LeadsScreen() {
       status: values.status,
       notes: clean(values.notes),
       next_action: clean(values.next_action),
-      follow_up_date: values.follow_up_date ? `${values.follow_up_date}T09:00:00.000Z` : null,
+      follow_up_date: values.follow_up_date ? toIsoAtDefaultTime(values.follow_up_date) : null,
       updated_at: new Date().toISOString(),
     };
 
@@ -112,12 +148,14 @@ export function LeadsScreen() {
     }
 
     setFormVisible(false);
+    setSuccessMessage(selectedLead ? 'Lead erfolgreich aktualisiert.' : 'Lead erfolgreich angelegt.');
     setSelectedLead(null);
     setDetailVisible(false);
     setAiOutput(null);
   }
 
   async function handleRunAiAction(lead: LeadRow, type: AiActionType) {
+    setSuccessMessage(null);
     const result = await runAction(lead, type);
     if (!result.error) {
       setAiOutput(result.output);
@@ -140,6 +178,7 @@ export function LeadsScreen() {
         ...payload,
       };
       setSelectedLead(updatedLead);
+      setSuccessMessage(target === 'next_action' ? 'AI-Vorschlag als nächste Aktion übernommen.' : 'AI-Vorschlag in Notizen übernommen.');
     }
   }
 
@@ -162,6 +201,8 @@ export function LeadsScreen() {
           <Text style={styles.primaryButtonText}>+ Lead</Text>
         </Pressable>
       </View>
+
+      {successMessage ? <Text style={styles.successText}>{successMessage}</Text> : null}
 
       <TextInput
         style={styles.searchInput}
@@ -213,7 +254,7 @@ export function LeadsScreen() {
             </View>
             <Text style={styles.cardSubtitle}>{item.company || 'Keine Firma hinterlegt'}</Text>
             <Text style={styles.cardMeta}>Nächste Aktion: {item.next_action || '—'}</Text>
-            <Text style={styles.cardMeta}>Follow-up: {item.follow_up_date ? item.follow_up_date.slice(0, 10) : '—'}</Text>
+            <Text style={styles.cardMeta}>Follow-up: {formatFollowUpDate(item.follow_up_date)}</Text>
           </Pressable>
         )}
         ListEmptyComponent={
@@ -268,12 +309,30 @@ export function SettingsScreen() {
   );
 }
 
-function renderTodayCard(lead: LeadRow) {
+function renderTodayCard(
+  lead: LeadRow,
+  onMarkContacted: (lead: LeadRow) => void,
+  onSnooze: (lead: LeadRow, days: number) => void
+) {
   return (
     <View key={lead.id} style={styles.todayCard}>
       <Text style={styles.todayCardTitle}>{lead.name}</Text>
       <Text style={styles.todayCardMeta}>{lead.company || 'Keine Firma'}</Text>
+      <Text style={styles.todayCardMeta}>Status: {formatLeadStatus(lead.status)}</Text>
       <Text style={styles.todayCardMeta}>Nächste Aktion: {lead.next_action || '—'}</Text>
+      <Text style={styles.todayCardMeta}>Follow-up: {formatFollowUpDate(lead.follow_up_date)}</Text>
+
+      <View style={styles.quickActionRow}>
+        <Pressable onPress={() => onMarkContacted(lead)} style={[styles.quickActionButton, styles.quickActionPrimary]}>
+          <Text style={styles.quickActionPrimaryText}>Kontaktiert</Text>
+        </Pressable>
+        <Pressable onPress={() => onSnooze(lead, 1)} style={[styles.quickActionButton, styles.quickActionSecondary]}>
+          <Text style={styles.quickActionSecondaryText}>+1 Tag</Text>
+        </Pressable>
+        <Pressable onPress={() => onSnooze(lead, 3)} style={[styles.quickActionButton, styles.quickActionSecondary]}>
+          <Text style={styles.quickActionSecondaryText}>+3 Tage</Text>
+        </Pressable>
+      </View>
     </View>
   );
 }
@@ -310,6 +369,16 @@ const styles = StyleSheet.create({
     fontSize: 15,
     lineHeight: 22,
     marginBottom: 16,
+  },
+  successText: {
+    color: '#166534',
+    backgroundColor: '#DCFCE7',
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 12,
+    fontSize: 14,
+    lineHeight: 20,
   },
   section: {
     marginBottom: 24,
@@ -461,5 +530,34 @@ const styles = StyleSheet.create({
     color: '#64748B',
     fontSize: 14,
     marginBottom: 2,
+  },
+  quickActionRow: {
+    flexDirection: 'row',
+    gap: 8,
+    marginTop: 14,
+  },
+  quickActionButton: {
+    flex: 1,
+    minHeight: 40,
+    borderRadius: 10,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 8,
+  },
+  quickActionPrimary: {
+    backgroundColor: '#0F172A',
+  },
+  quickActionPrimaryText: {
+    color: '#FFFFFF',
+    fontWeight: '700',
+    fontSize: 13,
+  },
+  quickActionSecondary: {
+    backgroundColor: '#E2E8F0',
+  },
+  quickActionSecondaryText: {
+    color: '#0F172A',
+    fontWeight: '700',
+    fontSize: 13,
   },
 });
