@@ -12,10 +12,12 @@ import {
 } from 'react-native';
 import { useAuth } from '../providers/auth-provider';
 import { useLeads } from '../hooks/use-leads';
+import { useAiActions } from '../hooks/use-ai-actions';
 import { LeadDetailModal } from '../components/lead-detail-modal';
 import { LeadForm, LeadFormValues } from '../components/lead-form';
 import { Database } from '../types/supabase';
 import { formatLeadStatus } from '../types/leads';
+import { AiActionType } from '../types/ai';
 
 type LeadRow = Database['public']['Tables']['leads']['Row'];
 
@@ -56,12 +58,14 @@ export function TodayScreen() {
 export function LeadsScreen() {
   const { session } = useAuth();
   const { leads, loading, error, reload, createLead, updateLead } = useLeads(session?.user.id);
+  const { loading: aiLoading, error: aiError, runAction } = useAiActions(session?.user.id);
   const [query, setQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | LeadRow['status']>('all');
   const [formVisible, setFormVisible] = useState(false);
   const [detailVisible, setDetailVisible] = useState(false);
   const [selectedLead, setSelectedLead] = useState<LeadRow | null>(null);
   const [formError, setFormError] = useState<string | null>(null);
+  const [aiOutput, setAiOutput] = useState<string | null>(null);
 
   const filteredLeads = useMemo(() => {
     const normalizedQuery = query.trim().toLowerCase();
@@ -110,6 +114,33 @@ export function LeadsScreen() {
     setFormVisible(false);
     setSelectedLead(null);
     setDetailVisible(false);
+    setAiOutput(null);
+  }
+
+  async function handleRunAiAction(lead: LeadRow, type: AiActionType) {
+    const result = await runAction(lead, type);
+    if (!result.error) {
+      setAiOutput(result.output);
+    }
+  }
+
+  async function handleUseAiOutput(lead: LeadRow, target: AiActionType) {
+    if (!aiOutput) return;
+
+    const payload =
+      target === 'next_action'
+        ? { next_action: aiOutput }
+        : { notes: lead.notes ? `${lead.notes}\n\n${aiOutput}` : aiOutput };
+
+    const result = await updateLead(lead.id, payload);
+
+    if (!result.error) {
+      const updatedLead = {
+        ...lead,
+        ...payload,
+      };
+      setSelectedLead(updatedLead);
+    }
   }
 
   return (
@@ -123,6 +154,7 @@ export function LeadsScreen() {
           onPress={() => {
             setSelectedLead(null);
             setFormError(null);
+            setAiOutput(null);
             setFormVisible(true);
           }}
           style={styles.primaryButton}
@@ -168,6 +200,7 @@ export function LeadsScreen() {
           <Pressable
             onPress={() => {
               setSelectedLead(item);
+              setAiOutput(null);
               setDetailVisible(true);
             }}
             style={styles.card}
@@ -201,6 +234,11 @@ export function LeadsScreen() {
           setDetailVisible(false);
           setFormVisible(true);
         }}
+        aiLoading={aiLoading}
+        aiOutput={aiOutput}
+        aiError={aiError}
+        onRunAiAction={handleRunAiAction}
+        onUseAiOutput={handleUseAiOutput}
       />
 
       <LeadForm
